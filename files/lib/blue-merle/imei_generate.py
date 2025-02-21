@@ -177,7 +177,7 @@ def validate_imei(imei: str) -> bool:
     return False
 
 
-if __name__ == '__main__':
+def main() -> int:
     args = ap.parse_args()
     imsi_d = None
     if args.verbose:
@@ -195,7 +195,7 @@ if __name__ == '__main__':
         if validate_imei(static_imei):
             set_imei(static_imei)
         else:
-            exit(-1)
+            return -1
     else:
         random_tac = random.choice(TAC_LIST)
         imei = generate_imei(random_tac, imsi_d, mode)
@@ -203,6 +203,10 @@ if __name__ == '__main__':
             print(f"Generated new IMEI: {imei}")
         if not args.generate_only:
             if not set_imei(imei):
-                exit(-1)
+                return -1
 
-    exit(0)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
