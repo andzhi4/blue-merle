@@ -27,7 +27,7 @@ class Mode(Enum):
     STATIC = 3
 
 
-IMEI_BASE_LENGTH = 14  # without validation digit
+IMEI_BASE_LENGTH = 14  # without check digit
 
 # TAC - Type Allocation code, first 8 digits of modern IMEI,
 #       that define make and model of the device.
@@ -107,7 +107,9 @@ def get_imei(logger: Logger = getLogger("get_imei")) -> bytes:
     return b"".join(imei_d)
 
 
-def calculate_check_digit(imei_without_check):
+def calculate_check_digit(
+    imei_base, logger: Logger = getLogger("calculate_check_digit")
+):
     """
     Luhn algorithm (https://en.wikipedia.org/wiki/Luhn_algorithm)
 
@@ -124,8 +126,10 @@ def calculate_check_digit(imei_without_check):
     4 - Return integer distance to the next multiple of 10: 60 - 52 = 8
 
     """
+    if len(imei_base) != IMEI_BASE_LENGTH:
+        logger.error(f"Invalid IMEI base: {imei_base}")
     sum = 0
-    for i, digit in enumerate(reversed(imei_without_check)):
+    for i, digit in enumerate(reversed(imei_base)):
         n = int(digit)
         if i % 2 == 0:
             doubled = n * 2
@@ -157,7 +161,7 @@ def generate_imei(
     random_part_length = IMEI_BASE_LENGTH - len(tac)
     logger.debug(f"Length of the random IMEI part: {random_part_length}")
     imei_base = tac + "".join(random.sample(string.digits, random_part_length))
-    logger.debug(f"IMEI without validation digit: {imei_base}")
+    logger.debug(f"IMEI without check digit: {imei_base}")
 
     imei = imei_base + calculate_check_digit(imei_base)
     logger.debug(f"Resulting IMEI: {imei}")
@@ -167,10 +171,9 @@ def generate_imei(
 
 def validate_imei(imei: str, logger: Logger = getLogger("validate_imei")) -> bool:
     # before anything check if length is 15 characters (8 TAC + 6 SN + 1 CHECK)
-    if len(imei) != IMEI_BASE_LENGTH + 1:
-        logger.error(
-            f"NOT A VALID IMEI: {imei} - IMEI must be {IMEI_BASE_LENGTH} characters in length"
-        )
+    # and it only contains digits
+    if (len(imei) != IMEI_BASE_LENGTH + 1) or (not imei.isdigit()):
+        logger.error(f"NOT A VALID IMEI: {imei}. Must be 15 digits")
         return False
     imei_base, check_digit = imei[:-1], imei[-1]
     logger.debug(f"{imei_base=}, {check_digit=}")
