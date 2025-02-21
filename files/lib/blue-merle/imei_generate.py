@@ -89,10 +89,10 @@ def set_imei(imei: str) -> bool:
     logger.debug(b"New IMEI: " + new_imei + b" Old IMEI: " + imei.encode())
 
     if new_imei == imei.encode():
-        print("IMEI has been successfully changed.")
+        logger.info("IMEI has been successfully changed.")
         return True
     else:
-        print("IMEI has not been successfully changed.")
+        logger.error("IMEI has not been successfully changed.")
         return False
 
 
