@@ -2,12 +2,13 @@
 import random
 import string
 import argparse
+from typing import Literal
 import serial
 import re
 from enum import Enum
 
 
-class Modes(Enum):
+class Mode(Enum):
     DETERMINISTIC = 1
     RANDOM = 2
     STATIC = 3
@@ -37,7 +38,7 @@ TAC_LIST = ["35674108", "35290611", "35397710", "35323210", "35384110",
                "35479164"]
 
 verbose = False
-mode = None
+mode: Mode = Mode.RANDOM
 
 # Serial global vars
 TTY = '/dev/ttyUSB3'
@@ -65,7 +66,7 @@ def get_imsi() -> bytes:
     return b"".join(imsi_d)
 
 
-def set_imei(imei: str) -> None:
+def set_imei(imei: str) -> bool:
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
         cmd = b'AT+EGMR=1,7,\"'+imei.encode()+b'\"\r'
         ser.write(cmd)
@@ -131,10 +132,10 @@ def calculate_check_digit(imei_without_check):
     return str((10 - sum % 10) % 10)
 
 
-def generate_imei(tac: str, imsi_seed = None) -> str:
+def generate_imei(tac: str, imsi_seed = None, mode: Mode = Mode.RANDOM) -> str:
     # In deterministic mode we seed the RNG with the IMSI.
     # As a consequence we will always generate the same IMEI for a given IMSI
-    if (mode == Modes.DETERMINISTIC):
+    if (mode == Mode.DETERMINISTIC):
         if not imsi_seed:
             raise ValueError('IMSI was not provided. To generate deterministic IMEI provide IMSI to use as seed')
         random.seed(imsi_seed)
@@ -182,22 +183,22 @@ if __name__ == '__main__':
     if args.verbose:
         verbose = args.verbose
     if args.deterministic:
-        mode = Modes.DETERMINISTIC
+        mode = Mode.DETERMINISTIC
         imsi_d = get_imsi()
     if args.random:
-        mode = Modes.RANDOM
+        mode = Mode.RANDOM
     if args.static is not None:
-        mode = Modes.STATIC
+        mode = Mode.STATIC
         static_imei = args.static
 
-    if mode == Modes.STATIC:
+    if mode == Mode.STATIC:
         if validate_imei(static_imei):
             set_imei(static_imei)
         else:
             exit(-1)
     else:
         random_tac = random.choice(TAC_LIST)
-        imei = generate_imei(random_tac, imsi_d)
+        imei = generate_imei(random_tac, imsi_d, mode)
         if (verbose):
             print(f"Generated new IMEI: {imei}")
         if not args.generate_only:
