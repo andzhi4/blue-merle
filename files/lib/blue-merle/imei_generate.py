@@ -9,17 +9,6 @@ from logging import Logger, getLogger
 
 import serial
 
-# Set up logging for the module
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-# Clear any existing handlers to avoid duplicates
-if root_logger.handlers:
-    root_logger.handlers.clear()
-console_handler = logging.StreamHandler()
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-console_handler.setFormatter(formatter)
-root_logger.addHandler(console_handler)
-
 
 class Mode(Enum):
     DETERMINISTIC = 1
@@ -27,7 +16,12 @@ class Mode(Enum):
     STATIC = 3
 
 
+LOGGER_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 IMEI_BASE_LENGTH = 14  # without check digit
+# Serial global vars
+TTY = "/dev/ttyUSB3"
+BAUDRATE = 9600
+TIMEOUT = 3
 
 # TAC - Type Allocation code, first 8 digits of modern IMEI,
 #       that define make and model of the device.
@@ -51,13 +45,20 @@ TAC_LIST = [
     "35479164",
 ]
 
-# Serial global vars
-TTY = "/dev/ttyUSB3"
-BAUDRATE = 9600
-TIMEOUT = 3
+# Set up logging for the module
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+# Clear any existing handlers to avoid duplicates
+if root_logger.handlers:
+    root_logger.handlers.clear()
+console_handler = logging.StreamHandler()
+formatter = logging.Formatter(LOGGER_FORMAT)
+console_handler.setFormatter(formatter)
+root_logger.addHandler(console_handler)
 
 
-def get_imsi(logger: Logger = getLogger("get_imsi")) -> bytes:
+def get_imsi() -> bytes:
+    logger: Logger = getLogger("get_imsi")
     logger.debug(f"Obtaining Serial {TTY} with timeout {TIMEOUT}...")
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
         logger.debug("Getting IMSI")
@@ -73,7 +74,8 @@ def get_imsi(logger: Logger = getLogger("get_imsi")) -> bytes:
     return b"".join(imsi_d)
 
 
-def set_imei(imei: str, logger: Logger = getLogger("set_imei")) -> bool:
+def set_imei(imei: str) -> bool:
+    logger: Logger = getLogger("set_imei")
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
         cmd = b'AT+EGMR=1,7,"' + imei.encode() + b'"\r'
         ser.write(cmd)
@@ -94,7 +96,8 @@ def set_imei(imei: str, logger: Logger = getLogger("set_imei")) -> bool:
         return False
 
 
-def get_imei(logger: Logger = getLogger("get_imei")) -> bytes:
+def get_imei() -> bytes:
+    logger: Logger = getLogger("get_imei")
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
         ser.write(b"AT+GSN\r")
         output = ser.read(64)
@@ -107,9 +110,7 @@ def get_imei(logger: Logger = getLogger("get_imei")) -> bytes:
     return b"".join(imei_d)
 
 
-def calculate_check_digit(
-    imei_base, logger: Logger = getLogger("calculate_check_digit")
-):
+def calculate_check_digit(imei_base):
     """
     Luhn algorithm (https://en.wikipedia.org/wiki/Luhn_algorithm)
 
@@ -126,6 +127,7 @@ def calculate_check_digit(
     4 - Return integer distance to the next multiple of 10: 60 - 52 = 8
 
     """
+    logger: Logger = getLogger("calculate_check_digit")
     if len(imei_base) != IMEI_BASE_LENGTH:
         logger.error(f"Invalid IMEI base: {imei_base}")
     sum = 0
@@ -140,12 +142,8 @@ def calculate_check_digit(
     return str((10 - sum % 10) % 10)
 
 
-def generate_imei(
-    tac: str,
-    imsi_seed=None,
-    mode: Mode = Mode.RANDOM,
-    logger: Logger = getLogger("generate_imei"),
-) -> str:
+def generate_imei(tac: str, imsi_seed=None, mode: Mode = Mode.RANDOM) -> str:
+    logger: Logger = getLogger("generate_imei")
     # In deterministic mode we seed the RNG with the IMSI.
     # As a consequence we will always generate the same IMEI for a given IMSI
     if mode == Mode.DETERMINISTIC:
@@ -169,7 +167,8 @@ def generate_imei(
     return imei
 
 
-def validate_imei(imei: str, logger: Logger = getLogger("validate_imei")) -> bool:
+def validate_imei(imei: str) -> bool:
+    logger: Logger = getLogger("validate_imei")
     # before anything check if length is 15 characters (8 TAC + 6 SN + 1 CHECK)
     # and it only contains digits
     if (len(imei) != IMEI_BASE_LENGTH + 1) or (not imei.isdigit()):
@@ -235,7 +234,7 @@ def main() -> int:
     else:
         random_tac = random.choice(TAC_LIST)
         imei = generate_imei(random_tac, imsi_d, mode)
-        logger.debug(f"Generated new IMEI: {imei}")
+        logger.info(f"Generated new IMEI: {imei}")
         if not args.generate_only:
             if not set_imei(imei):
                 return -1
