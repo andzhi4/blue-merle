@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 import argparse
-import logging
 import random
 import re
 import string
 from enum import Enum
-from logging import Logger, getLogger
 
 import serial
 
@@ -16,7 +14,40 @@ class Mode(Enum):
     STATIC = 3
 
 
-LOGGER_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# Note: GL750 python does not have logging module, so we have
+# to implement a makeshift replacement for global logging control
+class Level(Enum):
+    DEBUG = 10
+    INFO = 20
+    WARNING = 30
+    ERROR = 40
+    EXCEPTION = 50
+
+
+def log_message(level: Level, msg: str) -> None:
+    global LOGGING_LEVEL
+    if level.value >= LOGGING_LEVEL.value:
+        print(f"{level.name}: {msg}")
+
+
+# some simple wrappers for easier logging calls
+def log_debug(msg: str) -> None:
+    return log_message(Level.DEBUG, msg)
+
+
+def log_info(msg: str) -> None:
+    return log_message(Level.INFO, msg)
+
+
+def log_warning(msg: str) -> None:
+    return log_message(Level.WARNING, msg)
+
+
+def log_error(msg: str) -> None:
+    return log_message(Level.ERROR, msg)
+
+
+LOGGING_LEVEL = Level.INFO
 IMEI_BASE_LENGTH = 14  # without check digit
 # Serial global vars
 TTY = "/dev/ttyUSB3"
@@ -45,72 +76,61 @@ TAC_LIST = [
     "35479164",
 ]
 
-# Set up logging for the module
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-# Clear any existing handlers to avoid duplicates
-if root_logger.handlers:
-    root_logger.handlers.clear()
-console_handler = logging.StreamHandler()
-formatter = logging.Formatter(LOGGER_FORMAT)
-console_handler.setFormatter(formatter)
-root_logger.addHandler(console_handler)
-
 
 def get_imsi() -> bytes:
-    logger: Logger = getLogger("get_imsi")
-    logger.debug(f"Obtaining Serial {TTY} with timeout {TIMEOUT}...")
+
+    log_debug(f"Obtaining Serial {TTY} with timeout {TIMEOUT}...")
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
-        logger.debug("Getting IMSI")
+        log_debug("Getting IMSI")
         ser.write(b"AT+CIMI\r")
         # TODO: read loop until we have 'enough' of what to expect
         output = ser.read(64)
 
-    logger.debug(b"Output of AT+CIMI (Retrieve IMSI) command: " + output)
-    logger.debug("Output is of type: " + str(type(output)))
+    log_debug("Output of AT+CIMI (Retrieve IMSI) command: " + output.decode())
+    log_debug("Output is of type: " + str(type(output)))
     imsi_d = re.findall(b"[0-9]{15}", output)
-    logger.debug(f"TEST: Read IMSI is: {imsi_d}")
+    log_debug(f"TEST: Read IMSI is: {imsi_d}")
 
     return b"".join(imsi_d)
 
 
 def set_imei(imei: str) -> bool:
-    logger: Logger = getLogger("set_imei")
+
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
         cmd = b'AT+EGMR=1,7,"' + imei.encode() + b'"\r'
         ser.write(cmd)
         output = ser.read(64)
 
-    logger.debug(cmd)
-    logger.debug(b"Output of AT+EGMR (Set IMEI) command: " + output)
-    logger.debug("Output is of type: " + str(type(output)))
+    log_debug(cmd.decode())
+    log_debug("Output of AT+EGMR (Set IMEI) command: " + output.decode())
+    log_debug("Output is of type: " + str(type(output)))
 
     new_imei = get_imei()
-    logger.debug(b"New IMEI: " + new_imei + b" Old IMEI: " + imei.encode())
+    log_debug("New IMEI: " + new_imei.decode() + " Old IMEI: " + imei)
 
     if new_imei == imei.encode():
-        logger.info("IMEI has been successfully changed.")
+        log_info("IMEI has been successfully changed.")
         return True
     else:
-        logger.error("IMEI has not been successfully changed.")
+        log_error("IMEI has not been successfully changed.")
         return False
 
 
 def get_imei() -> bytes:
-    logger: Logger = getLogger("get_imei")
+
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
         ser.write(b"AT+GSN\r")
         output = ser.read(64)
 
-    logger.debug(b"Output of AT+GSN (Retrieve IMEI) command: " + output)
-    logger.debug("Output is of type: " + str(type(output)))
+    log_debug("Output of AT+GSN (Retrieve IMEI) command: " + output.decode())
+    log_debug("Output is of type: " + str(type(output)))
     imei_d = re.findall(b"[0-9]{15}", output)
-    logger.debug("TEST: Read IMEI is", imei_d)
+    log_debug(f"TEST: Read IMEI is {imei_d}")
 
     return b"".join(imei_d)
 
 
-def calculate_check_digit(imei_base):
+def calculate_check_digit(imei_base: str) -> str:
     """
     Luhn algorithm (https://en.wikipedia.org/wiki/Luhn_algorithm)
 
@@ -126,10 +146,13 @@ def calculate_check_digit(imei_base):
     3 - Add up all the digits: 4+1+8+0+2+5+8+2+0+3+4+3+1+4+5+2 = 52
     4 - Return integer distance to the next multiple of 10: 60 - 52 = 8
 
+    NOTE: this function returns type str for easier concatenation of the result with the rest of an IMEI
     """
-    logger: Logger = getLogger("calculate_check_digit")
+
     if len(imei_base) != IMEI_BASE_LENGTH:
-        logger.error(f"Invalid IMEI base: {imei_base}")
+        msg = f"Invalid IMEI base: {imei_base}! Length mismatch"
+        log_error(msg)
+        raise ValueError(msg)
     sum = 0
     for i, digit in enumerate(reversed(imei_base)):
         n = int(digit)
@@ -143,7 +166,7 @@ def calculate_check_digit(imei_base):
 
 
 def generate_imei(tac: str, imsi_seed=None, mode: Mode = Mode.RANDOM) -> str:
-    logger: Logger = getLogger("generate_imei")
+
     # In deterministic mode we seed the RNG with the IMSI.
     # As a consequence we will always generate the same IMEI for a given IMSI
     if mode == Mode.DETERMINISTIC:
@@ -155,44 +178,42 @@ def generate_imei(tac: str, imsi_seed=None, mode: Mode = Mode.RANDOM) -> str:
 
     # We use provided TAC,
     # Then we fill the rest of the IMEI with random characters
-    logger.debug(f"IMEI TAC: {tac}")
+    log_debug(f"IMEI TAC: {tac}")
     random_part_length = IMEI_BASE_LENGTH - len(tac)
-    logger.debug(f"Length of the random IMEI part: {random_part_length}")
+    log_debug(f"Length of the random IMEI part: {random_part_length}")
     imei_base = tac + "".join(random.sample(string.digits, random_part_length))
-    logger.debug(f"IMEI without check digit: {imei_base}")
+    log_debug(f"IMEI without check digit: {imei_base}")
 
     imei = imei_base + calculate_check_digit(imei_base)
-    logger.debug(f"Resulting IMEI: {imei}")
+    log_debug(f"Resulting IMEI: {imei}")
 
     return imei
 
 
 def validate_imei(imei: str) -> bool:
-    logger: Logger = getLogger("validate_imei")
+
     # before anything check if length is 15 characters (8 TAC + 6 SN + 1 CHECK)
     # and it only contains digits
     if (len(imei) != IMEI_BASE_LENGTH + 1) or (not imei.isdigit()):
-        logger.error(f"NOT A VALID IMEI: {imei}. Must be 15 digits")
+        log_error(f"NOT A VALID IMEI: {imei}. Must be 15 digits")
         return False
     imei_base, check_digit = imei[:-1], imei[-1]
-    logger.debug(f"{imei_base=}, {check_digit=}")
+    log_debug(f"{imei_base=}, {check_digit=}")
 
     check_digit_calculated = calculate_check_digit(imei_base)
 
     if check_digit == check_digit_calculated:
-        logger.info(f"{imei} is CORRECT")
+        log_info(f"{imei} is CORRECT")
         return True
 
-    logger.error(f"NOT A VALID IMEI: {imei}")
+    log_error(f"NOT A VALID IMEI: {imei}")
     return False
 
 
 def main() -> int:
+    global LOGGING_LEVEL
     mode = Mode.RANDOM
     imsi_d = None
-
-    # Setup logging
-    logger = logging.getLogger("imei_generate")
 
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -216,7 +237,7 @@ def main() -> int:
 
     args = ap.parse_args()
     if args.verbose:
-        root_logger.setLevel(logging.DEBUG)
+        LOGGING_LEVEL = Level.DEBUG
     if args.deterministic:
         mode = Mode.DETERMINISTIC
         imsi_d = get_imsi()
@@ -234,7 +255,7 @@ def main() -> int:
     else:
         random_tac = random.choice(TAC_LIST)
         imei = generate_imei(random_tac, imsi_d, mode)
-        logger.info(f"Generated new IMEI: {imei}")
+        log_info(f"Generated new IMEI: {imei}")
         if not args.generate_only:
             if not set_imei(imei):
                 return -1
