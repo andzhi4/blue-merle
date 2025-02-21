@@ -4,7 +4,6 @@ import string
 import argparse
 import serial
 import re
-from functools import reduce
 from enum import Enum
 
 
@@ -107,8 +106,8 @@ def calculate_check_digit(imei_without_check):
     """
     Luhn algorithm (https://en.wikipedia.org/wiki/Luhn_algorithm)
 
-    Example of a coplete IMEI: 490154203237518
-    It consisct of: 
+    Example of a complete IMEI: 490154203237518
+    It consists of: 
         - TAC(8 digits: 49015420), 
         - Serial Number(6 digits: 323751), 
         - Check Digit (8).
