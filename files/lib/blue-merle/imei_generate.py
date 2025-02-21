@@ -26,10 +26,13 @@ modes.add_argument("-s", "--static", help="Sets user-defined IMEI",
 modes.add_argument("-r", "--random", help="Sets random IMEI",
                    action="store_true")
 
-# Example IMEI: 490154203237518
-imei_length = 14  # without validation digit
-# IDEA: make prefix configurable via CLI option
-imei_prefix = ["35674108", "35290611", "35397710", "35323210", "35384110",
+
+IMEI_BASE_LENGTH = 14  # without validation digit
+
+# TAC - Type Allocation code, first 8 digits of modern IMEI, 
+#       that define make and model of the device.
+# More info: https://en.wikipedia.org/wiki/Type_Allocation_Code
+TAC_LIST = ["35674108", "35290611", "35397710", "35323210", "35384110",
                "35982748", "35672011", "35759049", "35266891", "35407115",
                "35538025", "35480910", "35324590", "35901183", "35139729",
                "35479164"]
@@ -43,7 +46,7 @@ BAUDRATE = 9600
 TIMEOUT = 3
 
 
-def get_imsi():
+def get_imsi() -> bytes:
     if (verbose):
         print(f'Obtaining Serial {TTY} with timeout {TIMEOUT}...')
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
@@ -63,7 +66,7 @@ def get_imsi():
     return b"".join(imsi_d)
 
 
-def set_imei(imei):
+def set_imei(imei: str) -> None:
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
         cmd = b'AT+EGMR=1,7,\"'+imei.encode()+b'\"\r'
         ser.write(cmd)
@@ -86,7 +89,7 @@ def set_imei(imei):
         return False
 
 
-def get_imei():
+def get_imei() -> bytes:
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
         ser.write(b'AT+GSN\r')
         output = ser.read(64)
@@ -100,79 +103,73 @@ def get_imei():
 
     return b"".join(imei_d)
 
+def calculate_check_digit(imei_without_check):
+    """
+    Luhn algorithm (https://en.wikipedia.org/wiki/Luhn_algorithm)
 
-def generate_imei(imei_prefix, imsi_d):
+    Example of a coplete IMEI: 490154203237518
+    It consisct of: 
+        - TAC(8 digits: 49015420), 
+        - Serial Number(6 digits: 323751), 
+        - Check Digit (8).
+    
+    To calculate the check digit based on TAC+Serial value (IMEI base) do the following:
+    1 - Double each second digit in the IMEI base: 4 18 0 2 5 8 2 0 3 4 3 14 5 2
+    2 - Separate this number into single digits: 4 1 8 0 2 5 8 2 0 3 4 3 1 4 5 2
+    3 - Add up all the digits: 4+1+8+0+2+5+8+2+0+3+4+3+1+4+5+2 = 52
+    4 - Return integer distance to the next multiple of 10: 60 - 52 = 8
+
+    """
+    sum = 0
+    for i, digit in enumerate(reversed(imei_without_check)):
+        n = int(digit)
+        if i % 2 == 0:
+            doubled = n * 2
+            sum += (doubled - 9) if doubled > 9 else doubled
+        else:
+            sum += n
+    
+    return str((10 - sum % 10) % 10)
+
+
+def generate_imei(tac: str, imsi_seed = None) -> str:
     # In deterministic mode we seed the RNG with the IMSI.
     # As a consequence we will always generate the same IMEI for a given IMSI
     if (mode == Modes.DETERMINISTIC):
-        random.seed(imsi_d)
+        if not imsi_seed:
+            raise ValueError('IMSI was not provided. To generate deterministic IMEI provide IMSI to use as seed')
+        random.seed(imsi_seed)
 
     # We choose a random prefix from the predefined list.
     # Then we fill the rest with random characters
-    imei = random.choice(imei_prefix)
     if (verbose):
-        print(f"IMEI prefix: {imei}")
-    random_part_length = imei_length - len(imei)
+        print(f"IMEI TAC: {tac}")
+    random_part_length = IMEI_BASE_LENGTH - len(tac)
     if (verbose):
         print(f"Length of the random IMEI part: {random_part_length}")
-    imei += "".join(random.sample(string.digits, random_part_length))
+    imei_base = tac + "".join(random.sample(string.digits, random_part_length))
     if (verbose):
-        print(f"IMEI without validation digit: {imei}")
+        print(f"IMEI without validation digit: {imei_base}")
 
-    # calculate validation digit
-    # Double each second digit in the IMEI: 4 18 0 2 5 8 2 0 3 4 3 14 5 2
-    # (excluding the validation digit)
-
-    iteration_1 = "".join([c if i % 2 == 0 else str(2*int(c)) for i, c in enumerate(imei)])
-
-    # Separate this number into single digits: 4 1 8 0 2 5 8 2 0 3 4 3 1 4 5 2
-    # (notice that 18 and 14 have been split).
-    # Add up all the numbers: 4+1+8+0+2+5+8+2+0+3+4+3+1+4+5+2 = 52
-
-    sum = reduce((lambda a, b: int(a) + int(b)), iteration_1)
-
-    # Take your resulting number, remember it, and round it up to the nearest
-    # multiple of ten: 60.
-    # Subtract your original number from the rounded-up number: 60 - 52 = 8.
-
-    validation_digit = (10 - int(str(sum)[-1])) % 10
-    if (verbose):
-        print(f"Validation digit: {validation_digit}")
-
-    imei = str(imei) + str(validation_digit)
+    imei = imei_base + calculate_check_digit(imei_base)
     if (verbose):
         print(f"Resulting IMEI: {imei}")
 
     return imei
 
 
-def validate_imei(imei):
+def validate_imei(imei: str) -> bool:
     # before anything check if length is 14 characters
-    if len(imei) != 14:
-        print(f"NOT A VALID IMEI: {imei} - IMEI must be 14 characters in length")
+    if len(imei) != IMEI_BASE_LENGTH:
+        print(f"NOT A VALID IMEI: {imei} - IMEI must be {IMEI_BASE_LENGTH} characters in length")
         return False
-    # cut off last digit
-    validation_digit = int(imei[-1])
-    imei_verify = imei[0:14]
+    imei_base, check_digit = imei[:-1], imei[-1]
     if (verbose):
-        print(imei_verify)
+        print(imei_base)
+    
+    check_digit_calculated = calculate_check_digit(imei_base)
 
-    # Double each second digit in the IMEI
-    iteration_1 = "".join([c if i % 2 == 0 else str(2*int(c)) for i, c in enumerate(imei_verify)])
-
-    # Separate this number into single digits and add them up
-    sum = reduce((lambda a, b: int(a) + int(b)), iteration_1)
-    if (verbose):
-        print(sum)
-
-    # Take your resulting number, remember it, and round it up to the nearest
-    # multiple of ten.
-    # Subtract your original number from the rounded-up number.
-    validation_digit_verify = (10 - int(str(sum)[-1])) % 10
-    if (verbose):
-        print(validation_digit_verify)
-
-    if validation_digit == validation_digit_verify:
+    if check_digit == check_digit_calculated:
         print(f"{imei} is CORRECT")
         return True
 
@@ -200,7 +197,8 @@ if __name__ == '__main__':
         else:
             exit(-1)
     else:
-        imei = generate_imei(imei_prefix, imsi_d)
+        random_tac = random.choice(TAC_LIST)
+        imei = generate_imei(random_tac, imsi_d)
         if (verbose):
             print(f"Generated new IMEI: {imei}")
         if not args.generate_only:
