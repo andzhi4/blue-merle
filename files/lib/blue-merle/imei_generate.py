@@ -77,7 +77,7 @@ TAC_LIST = [
 ]
 
 
-def get_imsi() -> bytes:
+def get_imsi() -> str:
 
     log_debug(f"Obtaining Serial {TTY} with timeout {TIMEOUT}...")
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
@@ -91,7 +91,7 @@ def get_imsi() -> bytes:
     imsi_d = re.findall(b"[0-9]{15}", output)
     log_debug(f"TEST: Read IMSI is: {imsi_d}")
 
-    return b"".join(imsi_d)
+    return b"".join(imsi_d).decode()
 
 
 def set_imei(imei: str) -> bool:
@@ -105,18 +105,21 @@ def set_imei(imei: str) -> bool:
     log_debug("Output of AT+EGMR (Set IMEI) command: " + output.decode())
     log_debug("Output is of type: " + str(type(output)))
 
+    # Read the new IMEI back to see if it was properly written
     new_imei = get_imei()
-    log_debug("New IMEI: " + new_imei.decode() + " Old IMEI: " + imei)
+    log_debug("New IMEI: " + new_imei + " Old IMEI: " + imei)
 
-    if new_imei == imei.encode():
+    if new_imei == imei:
         log_info("IMEI has been successfully changed.")
         return True
     else:
-        log_error("IMEI has not been successfully changed.")
+        log_error(
+            f"IMEI has not been successfully changed. Expected: {imei}, returned: {new_imei}"
+        )
         return False
 
 
-def get_imei() -> bytes:
+def get_imei() -> str:
 
     with serial.Serial(TTY, BAUDRATE, timeout=TIMEOUT, exclusive=True) as ser:
         ser.write(b"AT+GSN\r")
@@ -124,10 +127,10 @@ def get_imei() -> bytes:
 
     log_debug("Output of AT+GSN (Retrieve IMEI) command: " + output.decode())
     log_debug("Output is of type: " + str(type(output)))
-    imei_d = re.findall(b"[0-9]{15}", output)
-    log_debug(f"TEST: Read IMEI is {imei_d}")
+    imei = re.findall(b"[0-9]{15}", output)
+    log_debug(f"TEST: Read IMEI is {imei}")
 
-    return b"".join(imei_d)
+    return b"".join(imei).decode()
 
 
 def calculate_check_digit(imei_base: str) -> str:
@@ -213,7 +216,7 @@ def validate_imei(imei: str) -> bool:
 def main() -> int:
     global LOGGING_LEVEL
     mode = Mode.RANDOM
-    imsi_d = None
+    imsi = None
 
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -240,7 +243,7 @@ def main() -> int:
         LOGGING_LEVEL = Level.DEBUG
     if args.deterministic:
         mode = Mode.DETERMINISTIC
-        imsi_d = get_imsi()
+        imsi = get_imsi()
     if args.random:
         mode = Mode.RANDOM
     if args.static is not None:
@@ -254,7 +257,7 @@ def main() -> int:
             return -1
     else:
         random_tac = random.choice(TAC_LIST)
-        imei = generate_imei(random_tac, imsi_d, mode)
+        imei = generate_imei(random_tac, imsi, mode)
         log_info(f"Generated new IMEI: {imei}")
         if not args.generate_only:
             if not set_imei(imei):
