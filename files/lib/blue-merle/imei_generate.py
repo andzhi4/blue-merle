@@ -47,34 +47,16 @@ def log_error(msg: str) -> None:
     return log_message(Level.ERROR, msg)
 
 
+def log_exception(msg: str) -> None:
+    return log_message(Level.EXCEPTION, msg)
+
+
 LOGGING_LEVEL = Level.INFO
 IMEI_BASE_LENGTH = 14  # without check digit
 # Serial global vars
 TTY = "/dev/ttyUSB3"
 BAUDRATE = 9600
 TIMEOUT = 3
-
-# TAC - Type Allocation code, first 8 digits of modern IMEI,
-#       that define make and model of the device.
-# More info: https://en.wikipedia.org/wiki/Type_Allocation_Code
-TAC_LIST = [
-    "35674108",
-    "35290611",
-    "35397710",
-    "35323210",
-    "35384110",
-    "35982748",
-    "35672011",
-    "35759049",
-    "35266891",
-    "35407115",
-    "35538025",
-    "35480910",
-    "35324590",
-    "35901183",
-    "35139729",
-    "35479164",
-]
 
 
 def get_imsi() -> str:
@@ -89,6 +71,8 @@ def get_imsi() -> str:
     log_debug("Output of AT+CIMI (Retrieve IMSI) command: " + output.decode())
     log_debug("Output is of type: " + str(type(output)))
     imsi_d = re.findall(b"[0-9]{15}", output)
+    if not imsi_d:
+        raise ValueError("Cannot retrieve IMSI")
     log_debug(f"TEST: Read IMSI is: {imsi_d}")
 
     return b"".join(imsi_d).decode()
@@ -116,7 +100,7 @@ def set_imei(imei: str) -> bool:
         log_error(
             f"IMEI has not been successfully changed. Expected: {imei}, returned: {new_imei}"
         )
-        return False
+        raise ValueError("Error seting IMEI")
 
 
 def get_imei() -> str:
@@ -128,6 +112,8 @@ def get_imei() -> str:
     log_debug("Output of AT+GSN (Retrieve IMEI) command: " + output.decode())
     log_debug("Output is of type: " + str(type(output)))
     imei = re.findall(b"[0-9]{15}", output)
+    if not imei:
+        raise ValueError("Cannot retrieve IMEI")
     log_debug(f"TEST: Read IMEI is {imei}")
 
     return b"".join(imei).decode()
@@ -168,17 +154,14 @@ def calculate_check_digit(imei_base: str) -> str:
     return str((10 - sum % 10) % 10)
 
 
-def generate_imei(tac: str, imsi_seed=None, mode: Mode = Mode.RANDOM) -> str:
+def generate_imei(tac: str, imsi_seed: str | None = None) -> str:
 
     # In deterministic mode we seed the RNG with the IMSI.
     # As a consequence we will always generate the same IMEI for a given IMSI
-    if mode == Mode.DETERMINISTIC:
-        if not imsi_seed:
-            raise ValueError(
-                "IMSI was not provided. To generate deterministic IMEI provide IMSI to use as seed"
-            )
+    if imsi_seed:
         random.seed(imsi_seed)
-
+    if len(tac) != 8 or not (tac.isdigit()):
+        raise ValueError(f"Invalid TAC {tac}")
     # We use provided TAC,
     # Then we fill the rest of the IMEI with random characters
     log_debug(f"IMEI TAC: {tac}")
@@ -213,10 +196,33 @@ def validate_imei(imei: str) -> bool:
     return False
 
 
+def get_random_tac(make: str | None = None) -> str:
+    # TAC - Type Allocation code, first 8 digits of modern IMEI,
+    #       that define make and model of the device.
+    # More info: https://en.wikipedia.org/wiki/Type_Allocation_Code
+    # fmt: off
+    tac: dict[str, list[str]] = {
+        "xiaomi": ["86881303"],
+        "oneplus": ["86551004","86492106"],
+        "samsung": ["32930400","35684610","35480910","35324590","35901183","35139729","35479164","35299018"],
+        "google": ["35964309","35751110","35751310","35131133"],
+        "apple": ["35325807","35299209","35103627","35676211","35925406","35438506","35326907","35674108","35290611","35397710","35323210","35384110","35982748","35672011","35759049","35266891","35407115","35538025","35302011","35614409","35660608","35638810"],
+    }
+    # fmt: on
+    # return random make tac, or a random tac from superset of all available tacs
+    if make:
+        log_debug(f"getting random TAC for {make}")
+        if make.lower() not in tac:
+            raise KeyError(f"Unknown make. Choose from {', '.join(tac.keys())}")
+        return random.choice(tac[make.lower()])
+    else:
+        log_debug(f"getting random TAC")
+        return random.choice([v for vl in tac.values() for v in vl])
+
+
 def main() -> int:
     global LOGGING_LEVEL
     mode = Mode.RANDOM
-    imsi = None
 
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -227,6 +233,13 @@ def main() -> int:
         "--generate-only",
         help="Only generates an IMEI rather than setting it",
         action="store_true",
+    )
+    ap.add_argument(
+        "-m",
+        "--make",
+        help="Prefer TAC from specified make",
+        action="store",
+        default=None,
     )
     modes = ap.add_mutually_exclusive_group()
     modes.add_argument(
@@ -243,27 +256,36 @@ def main() -> int:
         LOGGING_LEVEL = Level.DEBUG
     if args.deterministic:
         mode = Mode.DETERMINISTIC
-        imsi = get_imsi()
     if args.random:
         mode = Mode.RANDOM
     if args.static is not None:
         mode = Mode.STATIC
-        static_imei = args.static
+    try:
+        match mode:
+            case Mode.STATIC:
+                imei = args.static
+            case Mode.RANDOM:
+                imei = generate_imei(get_random_tac(args.make))
+            case Mode.DETERMINISTIC:
+                imei = generate_imei(get_random_tac(args.make), imsi_seed=get_imsi())
+            case _:
+                raise TypeError("Mode not supported")
 
-    if mode == Mode.STATIC:
-        if validate_imei(static_imei):
-            set_imei(static_imei)
-        else:
-            return -1
-    else:
-        random_tac = random.choice(TAC_LIST)
-        imei = generate_imei(random_tac, imsi, mode)
-        log_info(f"Generated new IMEI: {imei}")
-        if not args.generate_only:
-            if not set_imei(imei):
-                return -1
+        if not validate_imei(imei):
+            raise ValueError(f"Invalid IMEI Provided: {imei}")
 
-    return 0
+        print(f"Generated IMEI: {imei}")
+        if args.generate_only:
+            log_info("User requested generate_only, not setting new IMEI")
+            return 0
+
+        result = set_imei(imei)
+        if not result:
+            raise RuntimeError("Unable to set new IMEI")
+        return 0
+    except Exception as e:
+        log_exception(str(e))
+        return 1
 
 
 if __name__ == "__main__":
