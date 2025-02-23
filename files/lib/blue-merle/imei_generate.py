@@ -4,7 +4,7 @@ import random
 import re
 import string
 from enum import Enum
-from typing import Dict, Union
+from typing import Dict, TypedDict, Union
 
 import serial
 
@@ -63,8 +63,8 @@ class IMEI:
     TAC_LENGTH: int = 8
 
     def __init__(self, val: str | int | bytes):
-        self.__imei: bytes = None  # Double underscore for name mangling
-        self.imei = val  # This will use the setter
+        self.__imei: bytes  # Double underscore for name mangling
+        self.imei = val  # type: ignore
 
     @property
     def imei(self) -> bytes:
@@ -74,7 +74,7 @@ class IMEI:
     def imei(self, val: str | int | bytes):
         value = val if isinstance(val, bytes) else str(val).encode()
         if not self.validate(value):
-            raise ValueError(f"Invalid IMEI provided: {value}")
+            raise ValueError(f"Invalid IMEI provided: {value.decode()}")
         else:
             self.__imei = value
 
@@ -146,18 +146,18 @@ class IMEI:
             random.seed(imsi_seed)
 
         if tac:
-            tac: str = tac.decode() if isinstance(tac, bytes) else str(tac)
-            if len(tac) != 8 or not (tac.isdigit()):
-                raise ValueError(f"Invalid TAC {tac}")
+            tac_str = tac_str.decode() if isinstance(tac, bytes) else str(tac)  # type: ignore
+            if len(tac_str) != 8 or not (tac_str.isdigit()):
+                raise ValueError(f"Invalid TAC {tac_str}")
         else:
             # NOTE: make sure it makes sense to generate completely random IMEIs
-            tac: str = "".join(random.sample(string.digits, cls.TAC_LENGTH))
+            tac_str = "".join(random.sample(string.digits, cls.TAC_LENGTH))
 
         # We use provided TAC,
         # Then we fill the rest of the IMEI with random characters
-        logger.debug(f"IMEI TAC: {tac}", caller=caller)
+        logger.debug(f"IMEI TAC: {tac_str}", caller=caller)
         random_part_length = cls.IMEI_LENGTH - cls.TAC_LENGTH - 1
-        imei_base = tac + "".join(random.sample(string.digits, random_part_length))
+        imei_base = tac_str + "".join(random.sample(string.digits, random_part_length))
 
         imei = IMEI(imei_base + cls.calculate_check_digit(imei_base))
         logger.debug(f"generated IMEI: {imei}", caller=caller)
@@ -167,10 +167,10 @@ class IMEI:
     def get_bytes(self) -> bytes:
         return self.imei
 
-    def __eq__(self, other: "IMEI"):
-        if isinstance(other, IMEI):
-            return self.imei == other.imei
-        raise TypeError(f"Cannot compare instance of IMEI with {type(other)}")
+    def __eq__(self, other: object):
+        if not isinstance(other, IMEI):
+            return NotImplemented
+        return self.imei == other.imei
 
     def __str__(self) -> str:
         return self.imei.decode()
@@ -182,9 +182,19 @@ class IMEI:
 class SerialOps:
     """Generic class to handle AT commands"""
 
-    Config = Dict[
-        str, Union[str, int, bool]
-    ]  # Mudi has Python 3.10, thus no "type" keyword
+    class Config(TypedDict, total=False):
+        port: Union[str, None]
+        baudrate: int
+        bytesize: int
+        parity: str
+        stopbits: float
+        timeout: Union[float, None]
+        xonxoff: bool
+        rtscts: bool
+        write_timeout: Union[float, None]
+        dsrdtr: bool
+        inter_byte_timeout: Union[float, None]
+        exclusive: Union[bool, None]
 
     _default_config: Config = {
         "port": "/dev/ttyUSB3",
@@ -193,14 +203,14 @@ class SerialOps:
         "exclusive": True,
     }
 
-    def __init__(self, config: Config = None):
+    def __init__(self, config: Config = {}):
         self.config = {**self._default_config, **(config or {})}
 
     def issue_at_command(self, command: bytes) -> bytes:
         "Issue an AT command using instance config"
         caller = "issue_AT_command"
         logger.debug(f"issuing command: {command.decode()}", caller=caller)
-        with serial.Serial(**self.config) as ser:
+        with serial.Serial(**self.config) as ser:  # type: ignore
             ser.write(command)
             # TODO: read loop until we have 'enough' of what to expect
             output = ser.read(64)
@@ -211,7 +221,7 @@ class SerialOps:
 class ModemOps(SerialOps):
     "Collection of functions that perform AT commands on Mudi modem"
 
-    def __init__(self, config: SerialOps.Config = None):
+    def __init__(self, config: SerialOps.Config = {}):
         super().__init__(config)
 
     def get_imsi(self) -> str:
