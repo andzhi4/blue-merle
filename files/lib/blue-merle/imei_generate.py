@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import inspect
 import random
 import re
 import string
@@ -7,12 +8,6 @@ from enum import Enum
 from typing import Dict, Union
 
 import serial
-
-
-class Mode(Enum):
-    DETERMINISTIC = 1
-    RANDOM = 2
-    STATIC = 3
 
 
 # Note: GL750 python does not have logging module, so we have
@@ -25,34 +20,42 @@ class Level(Enum):
     EXCEPTION = 50
 
 
-def log_message(level: Level, msg: str) -> None:
-    global LOGGING_LEVEL
-    if level.value >= LOGGING_LEVEL.value:
-        print(f"{level.name}: {msg}")
+class Logger:
+    def __init__(self, level: Level = Level.INFO):
+        self._level = level
+
+    @property
+    def level(self) -> Level:
+        return self._level
+
+    @level.setter
+    def level(self, value: Level) -> None:
+        if not isinstance(value, Level):
+            raise ValueError("Level must be a Level enum value")
+        self._level = value
+
+    def _log(self, level: Level, msg: str, caller: str | None = None) -> None:
+        if level.value >= self._level.value:
+            print(f"{level.name} [{caller or ''}]: {msg}")
+
+    # dict that maps class attributes to logging levels
+    _level_logger: dict[str, Level] = {level.name.lower(): level for level in Level}
+
+    def __getattr__(self, name):
+        """
+        This allows us to call logger.debug(), logger.info() without
+        hardcoding a function for every available level.
+        """
+        if name in self._level_logger:
+            return lambda msg, caller=None: self._log(
+                level=self._level_logger[name], msg=msg, caller=caller
+            )
+
+        raise AttributeError(f"'Logger' object has no attribute '{name}'")
 
 
-# some simple wrappers for easier logging calls
-def log_debug(msg: str) -> None:
-    return log_message(Level.DEBUG, msg)
-
-
-def log_info(msg: str) -> None:
-    return log_message(Level.INFO, msg)
-
-
-def log_warning(msg: str) -> None:
-    return log_message(Level.WARNING, msg)
-
-
-def log_error(msg: str) -> None:
-    return log_message(Level.ERROR, msg)
-
-
-def log_exception(msg: str) -> None:
-    return log_message(Level.EXCEPTION, msg)
-
-
-LOGGING_LEVEL = Level.INFO
+# global logger instance
+logger = Logger()
 
 
 class IMEI:
@@ -78,20 +81,23 @@ class IMEI:
 
     @classmethod
     def validate(cls, imei: str | int | bytes):
+        caller = "validate"
         imei = imei.decode() if isinstance(imei, bytes) else str(imei)
         if (len(imei) != cls.IMEI_LENGTH) or (not imei.isdigit()):
-            log_error(f"NOT A VALID IMEI: {imei}. Must be {cls.IMEI_LENGTH} digits")
+            logger.error(
+                f"Invalid IMEI: {imei}. Must be {cls.IMEI_LENGTH} digits", caller=caller
+            )
             return False
         imei_base, check_digit = imei[:-1], imei[-1]
-        log_debug(f"{imei_base=}, {check_digit=}")
+        logger.debug(f"{imei_base=}, {check_digit=}", caller=caller)
 
         check_digit_calculated = cls.calculate_check_digit(imei_base)
 
         if check_digit == check_digit_calculated:
-            log_debug(f"{imei} is CORRECT")
+            logger.debug(f"{imei} is correct", caller=caller)
             return True
 
-        log_error(f"NOT A VALID IMEI: {imei}")
+        logger.error(f"Invalid IMEI: {imei}")
         return False
 
     @classmethod
@@ -113,10 +119,9 @@ class IMEI:
 
         NOTE: this function returns type str for easier concatenation of the result with the rest of an IMEI
         """
-
         if len(imei_base) != csl.IMEI_LENGTH - 1:
             msg = f"Invalid IMEI base: {imei_base}, Length mismatch. Expected: {csl.IMEI_LENGTH - 1}, got {len(imei_base)}"
-            log_error(msg)
+            logger.error(msg)
             raise ValueError(msg)
         sum = 0
         for i, digit in enumerate(reversed(imei_base)):
@@ -135,7 +140,7 @@ class IMEI:
         tac: Union[str, int, bytes, None] = None,
         imsi_seed: Union[str, int, bytes, None] = None,
     ) -> "IMEI":
-
+        caller = "generate"
         # In deterministic mode we seed the RNG with the IMSI.
         # As a consequence we will always generate the same IMEI for a given IMSI
         if imsi_seed:
@@ -148,16 +153,15 @@ class IMEI:
         else:
             # NOTE: make sure it makes sense to generate completely random IMEIs
             tac: str = "".join(random.sample(string.digits, cls.TAC_LENGTH))
-            log_debug(f"Generated TAC: {tac}")
 
         # We use provided TAC,
         # Then we fill the rest of the IMEI with random characters
-        log_debug(f"IMEI TAC: {tac}")
+        logger.debug(f"IMEI TAC: {tac}", caller=caller)
         random_part_length = cls.IMEI_LENGTH - cls.TAC_LENGTH - 1
         imei_base = tac + "".join(random.sample(string.digits, random_part_length))
 
         imei = IMEI(imei_base + cls.calculate_check_digit(imei_base))
-        log_debug(f"Resulting IMEI: {imei}")
+        logger.debug(f"generated IMEI: {imei}", caller=caller)
 
         return imei
 
@@ -192,15 +196,16 @@ class SerialOps:
 
     def __init__(self, config: Config = None):
         self.config = {**self._default_config, **(config or {})}
-        log_debug(f"")
 
     def issue_at_command(self, command: bytes) -> bytes:
         "Issue an AT command using instance config"
-        log_debug(f"Issuing {command.decode} command...")
+        caller = "issue_AT_command"
+        logger.debug(f"issuing command: {command.decode()}", caller=caller)
         with serial.Serial(**self.config) as ser:
             ser.write(command)
             # TODO: read loop until we have 'enough' of what to expect
             output = ser.read(64)
+            logger.debug(f"result: {output.decode().strip()}", caller=caller)
         return output
 
 
@@ -211,40 +216,47 @@ class ModemOps(SerialOps):
         super().__init__(config)
 
     def get_imsi(self) -> str:
-        output = self.issue_at_command(b"AT+CIMI\r")
-        log_debug("Output of AT+CIMI (Retrieve IMSI) command: " + output.decode())
+        caller = "get_imsi"
+        cmd = b"AT+CIMI\r"
+        output = self.issue_at_command(cmd)
         imsi_d = re.findall(b"[0-9]{15}", output)
         if not imsi_d:
             raise ValueError("Cannot retrieve IMSI")
-        log_debug(f"TEST: Read IMSI is: {imsi_d}")
+        logger.debug(f"retrieved IMSI: {imsi_d}", caller=caller)
 
         return b"".join(imsi_d).decode()
 
     def set_imei(self, imei: IMEI) -> bool:
-        cmd = b'AT+EGMR=1,7,"' + imei.get_bytes() + b'"\r'
-        output = self.issue_at_command(cmd)
-        log_debug(f"command: {cmd.decode()}, output: {output.decode()}")
+        caller = "set_imei"
+
+        initial_imei = self.get_imei()
+        logger.info(f"Current modem IMEI: {initial_imei}", caller=caller)
+        set_imei_cmd = b'AT+EGMR=1,7,"' + imei.get_bytes() + b'"\r'
+        _ = self.issue_at_command(set_imei_cmd)
 
         # Read the new IMEI back to see if it was properly written
         new_imei = self.get_imei()
-        log_debug(f"New IMEI: {new_imei}, Old IMEI: {imei}")
+        logger.debug(f"New IMEI: {new_imei}, Old IMEI: {initial_imei}", caller=caller)
 
-        if new_imei == imei:
-            log_debug("IMEI has been successfully changed.")
+        if new_imei == imei and new_imei != initial_imei:
+            logger.info(
+                f"IMEI has been successfully changed: {initial_imei} -> {new_imei}",
+                caller=caller,
+            )
             return True
         else:
-            msg = f"Error changing IMEI. Expected: {imei}, returned: {new_imei}"
-            log_error(msg)
+            msg = f"Error changing IMEI. Current modem IMEI: {new_imei}"
+            logger.error(msg, caller=caller)
             raise ValueError(msg)
 
     def get_imei(self) -> IMEI:
+        caller = "get_imei"
         cmd = b"AT+GSN\r"
         output = self.issue_at_command(cmd)
-        log_debug(f"command: {cmd.decode()}, output: {output.decode()}")
         imei = re.findall(b"[0-9]{15}", output)
         if not imei:
             raise ValueError("Cannot retrieve IMEI")
-        log_debug(f"TEST: Read IMEI is {imei}")
+        logger.debug(f"retrieved IMEI is {imei}", caller=caller)
 
         return IMEI(b"".join(imei))
 
@@ -254,6 +266,7 @@ def get_random_tac(make: str | None = None) -> str:
     #       that define make and model of the device.
     # More info: https://en.wikipedia.org/wiki/Type_Allocation_Code
     # fmt: off
+    caller = 'get_random_tac'
     tac: dict[str, list[str]] = {
         "xiaomi": ["86881303"],
         "oneplus": ["86551004","86492106"],
@@ -264,19 +277,26 @@ def get_random_tac(make: str | None = None) -> str:
     # fmt: on
     # return random make tac, or a random tac from superset of all available tacs
     if make:
-        log_debug(f"getting random TAC for {make}")
+        logger.debug(f"getting random TAC for {make}", caller=caller)
         if make.lower() not in tac:
             raise KeyError(f"Unknown make. Choose from {', '.join(tac.keys())}")
         return random.choice(tac[make.lower()])
     else:
-        log_debug(f"getting random TAC")
+        logger.debug(f"getting random TAC", caller=caller)
         return random.choice([v for vl in tac.values() for v in vl])
 
 
+class Mode(Enum):
+    DETERMINISTIC = 1
+    RANDOM = 2
+    STATIC = 3
+
+
 def main() -> int:
-    global LOGGING_LEVEL
+    global logger
     mode = Mode.RANDOM
     modem = ModemOps()
+    caller = "main"
 
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -307,7 +327,7 @@ def main() -> int:
 
     args = ap.parse_args()
     if args.verbose:
-        LOGGING_LEVEL = Level.DEBUG
+        logger.level = Level.DEBUG
     if args.deterministic:
         mode = Mode.DETERMINISTIC
     if args.random:
@@ -327,17 +347,17 @@ def main() -> int:
             case _:
                 raise TypeError("Mode not supported")
 
-        print(f"Generated IMEI: {imei}")
+        logger.info(f"Generated IMEI: {imei}", caller=caller)
         if args.generate_only:
-            log_info("User requested generate_only, not setting new IMEI")
+            logger.info("Dry run, not setting new IMEI", caller=caller)
             return 0
 
-        result = mode.set_imei(imei)
+        result = modem.set_imei(imei)
         if not result:
             raise RuntimeError("Unable to set new IMEI")
         return 0
     except Exception as e:
-        log_exception(str(e))
+        logger.exception(str(e), caller=caller)
         return 1
 
 
